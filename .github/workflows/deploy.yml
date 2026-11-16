@@ -1,0 +1,35 @@
+name: Build and deploy to Firebase Hosting
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Check Maps key secret is present
+        env:
+          VITE_GOOGLE_MAPS_KEY: ${{ secrets.VITE_GOOGLE_MAPS_KEY }}
+        run: |
+          if [ -z "$VITE_GOOGLE_MAPS_KEY" ]; then
+            echo "VITE_GOOGLE_MAPS_KEY secret is missing; the Itinerary map would break. Aborting."
+            exit 1
+          fi
+      - run: npm ci
+      - name: Build
+        env:
+          VITE_GOOGLE_MAPS_KEY: ${{ secrets.VITE_GOOGLE_MAPS_KEY }}
+        run: npm run build
+      - uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          projectId: keepstamp-prod
+          channelId: live

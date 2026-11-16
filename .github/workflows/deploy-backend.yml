@@ -1,0 +1,39 @@
+name: Deploy rules and functions (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      what:
+        description: "What to deploy"
+        required: true
+        default: "rules"
+        type: choice
+        options:
+          - rules
+          - functions
+          - everything-backend
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install function dependencies
+        if: ${{ inputs.what != 'rules' }}
+        run: npm install --prefix functions
+      - name: Deploy
+        env:
+          SA_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          WHAT: ${{ inputs.what }}
+        run: |
+          printf '%s' "$SA_JSON" > "$RUNNER_TEMP/sa.json"
+          export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/sa.json"
+          case "$WHAT" in
+            rules) TARGETS="firestore:rules,storage" ;;
+            functions) TARGETS="functions" ;;
+            everything-backend) TARGETS="firestore:rules,storage,functions" ;;
+          esac
+          npx --yes firebase-tools@latest deploy --only "$TARGETS" --project keepstamp-prod --non-interactive
