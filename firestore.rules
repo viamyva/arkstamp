@@ -1,0 +1,129 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Ghost Mode ───────────────────────────────────────────────────────────
+    // edcrewguy@gmail.com can read/write any user's data.
+    function isAdmin() {
+      return request.auth != null &&
+             request.auth.token.email == 'edcrewguy@gmail.com';
+    }
+
+    // ── Shared-deck helpers ──────────────────────────────────────────────────
+    // The sharedDecks pointer doc is written by the acceptSharedDeck Cloud
+    // Function. Its id is ownerUid_chapterId and it contains { ownerUid, chapterId }.
+    // The collaborator record lives at:
+    //   users/{ownerUid}/chapters/{chapterId}/collaborators/{docId}
+    // and contains { email, role: 'viewer'|'editor'|'admin', status: 'active'|'pending' }.
+
+    // Returns true if the caller has an accepted sharedDecks pointer for this deck.
+    function hasSharedAccess(ownerUserId, chapterId) {
+      return request.auth != null &&
+             exists(/databases/$(database)/documents/users/$(request.auth.uid)/sharedDecks/$(ownerUserId + '_' + chapterId));
+    }
+
+    // Reads the caller's collaborator record from the owner's chapter.
+    // Returns the role string ('viewer', 'editor', 'admin') or '' if not found.
+    function sharedRole(ownerUserId, chapterId) {
+      let collabPath = /databases/$(database)/documents/users/$(ownerUserId)/chapters/$(chapterId)/collaborators;
+      // We can't query by email in rules, so we use the pointer doc which was
+      // written by the Cloud Function and stores the role directly for fast lookup.
+      let pointerDoc = get(/databases/$(database)/documents/users/$(request.auth.uid)/sharedDecks/$(ownerUserId + '_' + chapterId));
+      return pointerDoc.data.get('role', 'editor');
+    }
+
+    // A viewer can only read.
+    function isViewer(ownerUserId, chapterId) {
+      return hasSharedAccess(ownerUserId, chapterId) &&
+             sharedRole(ownerUserId, chapterId) == 'viewer';
+    }
+
+    // An editor can read and write content, but cannot delete the chapter itself
+    // or manage collaborators.
+    function isEditor(ownerUserId, chapterId) {
+      return hasSharedAccess(ownerUserId, chapterId) &&
+             (sharedRole(ownerUserId, chapterId) == 'editor' ||
+              sharedRole(ownerUserId, chapterId) == 'admin');
+    }
+
+    // An admin collaborator can also delete the chapter and manage sharing.
+    function isCollabAdmin(ownerUserId, chapterId) {
+      return hasSharedAccess(ownerUserId, chapterId) &&
+             sharedRole(ownerUserId, chapterId) == 'admin';
+    }
+
+    // ── User data ────────────────────────────────────────────────────────────
+    match /users/{userId} {
+      allow read, write: if (request.auth != null && request.auth.uid == userId)
+                         || isAdmin();
+
+      // Catch-all for all subcollections the owner can always access.
+      match /{document=**} {
+        allow read, write: if (request.auth != null && request.auth.uid == userId)
+                           || isAdmin();
+      }
+
+      // ── Shared chapter access ────────────────────────────────────────────
+      // The chapter document itself:
+      //   - viewers and editors can read
+      //   - editors can update (rename, change icon, tab config)
+      //   - only the owner (above) or a collab-admin can delete
+      match /chapters/{chapterId} {
+        allow read:   if isViewer(userId, chapterId) || isEditor(userId, chapterId);
+        allow update: if isEditor(userId, chapterId);
+        allow delete: if isCollabAdmin(userId, chapterId);
+
+        // Cards subcollection (Overview tab to-do items):
+        //   - viewers can read only
+        //   - editors can read, create, update, delete
+        match /cards/{cardId} {
+          allow read:             if isViewer(userId, chapterId) || isEditor(userId, chapterId);
+          allow create, update:   if isEditor(userId, chapterId);
+          allow delete:           if isEditor(userId, chapterId);
+        }
+
+        // Docs subcollection (built-in Docs tab file metadata):
+        //   - viewers can read only
+        //   - editors can upload (create) and rename (update)
+        //   - only the owner or collab-admin can delete
+        match /docs/{docId} {
+          allow read:           if isViewer(userId, chapterId) || isEditor(userId, chapterId);
+          allow create, update: if isEditor(userId, chapterId);
+          allow delete:         if isCollabAdmin(userId, chapterId);
+        }
+
+        // Custom tabs list:
+        //   - viewers can read
+        //   - editors can read and update tab metadata (e.g. rename)
+        //   - only owner or collab-admin can create/delete tabs
+        match /customTabs/{tabId} {
+          allow read:   if isViewer(userId, chapterId) || isEditor(userId, chapterId);
+          allow update: if isEditor(userId, chapterId);
+          allow create, delete: if isCollabAdmin(userId, chapterId);
+
+          // All content within a custom tab (items, contacts, events, etc.):
+          //   - viewers can read
+          //   - editors can read, create, update, delete content
+          match /{subcollection}/{docId} {
+            allow read:                   if isViewer(userId, chapterId) || isEditor(userId, chapterId);
+            allow create, update, delete: if isEditor(userId, chapterId);
+          }
+        }
+
+        // Collaborators subcollection:
+        //   - only the deck owner (matched above by userId == request.auth.uid)
+        //     or a collab-admin can read/write this
+        match /collaborators/{collabId} {
+          allow read, write: if isCollabAdmin(userId, chapterId);
+        }
+
+        // Activity log: editors can append entries; owner manages the rest
+        match /activityLog/{entryId} {
+          allow read:   if isViewer(userId, chapterId) || isEditor(userId, chapterId);
+          allow create: if isEditor(userId, chapterId);
+          allow delete: if isCollabAdmin(userId, chapterId);
+        }
+      }
+    }
+  }
+}
